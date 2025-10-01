@@ -23,13 +23,15 @@ p_load(
   svDialogs,
   docxtractr,
   purrr,
-  tidyverse
+  tidyverse, 
+  data.table,
+  lubridate
 )
 options(scipen = 999)
 source("source/function.R")
 
 # user input ####
-csv_filename <- "1500 Gen 1-5 Run Log (last month)" # user input
+csv_filename <- "1100 Gen 1-5 Run Log (last month)" # user input
 docx_tbl_filename <- "Generator Run log for August 2025" # word doc table
 facility <- "Mesa"
 
@@ -45,7 +47,7 @@ df_gen_log_in <- read.csv(file.path(fol_data, paste0(csv_filename, ".csv")))
 # do a bit of cleanup in order to be able to join it to other datasets
 df_doc_tbl <- read_excel(file.path(fol_data, paste0(docx_tbl_filename, ".xlsx"))) %>%
   mutate(
-    gen_date_key = str_replace_all(paste0(str_replace(generator, "(?i)Gen.*", "GEN"), "_", as.Date(date)), " ", "-"),
+    gen_date_key = str_replace_all(paste0(str_replace(str_replace_all(generator, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date)), " ", "-"),
     gen_range_val = str_replace(str_replace_all(str_extract(generator, "(?i)Gen.*"), "(?i)Gen-|(?i)Gen| ", ""), "-|&", ":"),
     gen_start_rng = str_replace_all(gen_range_val, ":.*", ""),
     gen_end_rng = str_replace_all(gen_range_val, ".*:", ""),
@@ -70,16 +72,7 @@ df_doc_tbl <- read_excel(file.path(fol_data, paste0(docx_tbl_filename, ".xlsx"))
   ) %>%
   rename(
     op_mode_comment = rfr
-  ) #%>%
-  # rowwise() %>%
-  # mutate(
-  #   gen_range = list(seq(start_val, end_val))
-  #   # gen_range = case_when(
-  #   #   !str_detect(gen_range_val, ":") ~ as.character(gen_range_val),
-  #   #   TRUE ~ as.character(unlist(map2(start_val, end_val, seq)))
-  #   # )
-  # ) %>%
-  # ungroup()
+  )
 
 if(nrow(df_doc_tbl) > 0){
   df_doc_tbl_exists <- TRUE
@@ -90,9 +83,6 @@ if(nrow(df_doc_tbl) > 0){
 # prep data
 # split df_gen_log_in by na rows, since each section of rows needs to be
 # loaded as its own sub dataset
-
-# gen blank rows
-# blank_rws <- apply(df_gen_log_in, 1, function(rw) all(is.na(rw) | rw == ""))
 
 # get column groupings, split by them
 # create a new dataframe which consists of gen info & original column names
@@ -110,7 +100,10 @@ df_prep <- gen_identifier %>%
 
 # get split index info
 rw_idxs <- lapply(names(df_gen_log_in), get_gen_idx) %>% unlist
-rw_diffs <- diff(rw_idxs)
+# rw_diffs <- diff(rw_idxs)
+rw_idxs_change_indx <- data.frame(grp = rw_idxs) %>% group_by(grp) %>% mutate(grp_id = cur_group_id()) %>% ungroup() %>% select(grp_id)
+rw_idxs_vec <- rw_idxs_change_indx[["grp_id"]] # turn back into vector to complete process
+rw_diffs <- diff(rw_idxs_vec) # rw_diffs <- diff(rw_idxs)
 rw_switch_ends <- which(rw_diffs != 0)
 rw_switch_starts <- rw_switch_ends[1:length(rw_switch_ends)] + 1
 rw_switch_starts <- c(1, rw_switch_starts)
@@ -144,15 +137,55 @@ rw_dfs_prep <- rw_dfs %>% lapply(function(df){
       group_size = n()
     )
 }) %>%
-  bind_rows()
+  bind_rows() %>%
+  mutate(
+    #treating dates as characters, remove seconds
+    date_cleaned = str_extract(timestamps, "[^:]*:[^:]*") #[^:] matches anything other than :
+  )
 
 # now that we've got a 'cleaned' dataset, split by generator, then split by group
 # number to create each individual new row
 colnames(rw_dfs_prep) <- tolower(colnames(rw_dfs_prep))
+
+# update 3 cases of building names, so that they will match the rfr doc table for joining
+rw_dfs_prep <- rw_dfs_prep %>%
+  mutate(
+    generator_info = str_replace(generator_info, "419", "M"),
+    generator_info = str_replace(generator_info, "426", "X"),
+    generator_info = str_replace(generator_info, "500", "M")
+  )
+
+
 gen_splt_lst <- split(rw_dfs_prep, rw_dfs_prep$generator_info)
 
 new_rws <- gen_splt_lst %>% lapply(function(gen_df){
-  grp_splt_lst <- split(gen_df, gen_df$group_num)
+  
+  # before moving on to next step, clean out unnecessary records:
+  # where engine running = 0
+  gen_df_rw_count <- cbind(row_number = seq_len(nrow(gen_df)), gen_df) # add row count for checks down the line
+  df_len <- nrow(gen_df_rw_count)
+  
+  gen_df_clean_er <- gen_df_rw_count %>%
+    mutate(
+      er_group_id = rleid(engine_running) # generate group ID for each consecutive set of identical values
+    ) %>%
+    group_by(er_group_id) %>%
+    mutate(
+      er_status_count = case_when(
+        engine_running == 0 ~ row_number(),
+        TRUE ~ 0
+      )
+    ) %>%
+    ungroup() %>%
+    filter(
+      er_status_count != row_number(), # for cases of 0's starting the dataset (0 must follow a 1 to be used)
+      er_status_count < 2, # only take the first zero when there are multiple
+      engine_running <= 1, # if any aberrant reading values in this column, omit those records
+      !(engine_running == 1 & row_number == nrow(gen_df_rw_count)) # if an engine startup record is the last record, omit
+    ) %>%
+      select(-c(er_group_id, er_status_count))
+
+  grp_splt_lst <- split(gen_df_clean_er, gen_df_clean_er$group_num) # a list of all row-group dataframes for a generator
   
   new_rws_df <- grp_splt_lst %>% lapply(function(grp){
     grp_size <- grp$group_size[1]
@@ -162,19 +195,30 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
       # get values in place, then create a new, 1-line df
       generator_val <- str_replace(grp$generator_info[1], "genlogs ", "")
       gen_range_val <- str_replace_all(str_extract(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*"), "(?i)Gen-|(?i)Gen| ", "")
-      date_val <- grp$timestamps[1]
+      date_val <- grp$date_cleaned[1] #grp$timestamps[1]
       hr_meter_val <- grp$runtime_hr_[2]
       power_ld_val <- grp$max_power_kw_[2]
-      # downstrm_temp_val <- paste0(round(as.numeric(grp[, str_detect(names(grp), "downstream")][1]), 3), " to ", round(as.numeric(grp[, str_detect(names(grp), "downstream")][2]), 3))
-      downstrm_temp_val <- paste0(
-        round(as.numeric(pull(grp[1, str_detect(names(grp), "downstream")])), 3),
-        " to ",
-        round(as.numeric(pull(grp[2, str_detect(names(grp), "downstream")])), 3)
-      )
+
       building_val = str_replace_all(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*|-| ", "")
       
-      # get vals in place to determine controlled status
-      check_temp_val <- min(grp[, str_detect(names(grp), "downstream")])
+      # get vals in place to determine controlled status, account for files without downstream temp info
+      if (sum(str_detect(names(grp), "downstream")) > 0){
+        check_temp_val <- min(grp[, str_detect(names(grp), "downstream")])
+        
+        # get downstream temp min & max to concat min-max
+        dst_vector <- c(round(as.numeric(pull(grp[1, str_detect(names(grp), "downstream")])), 3),
+                        round(as.numeric(pull(grp[2, str_detect(names(grp), "downstream")])), 3))
+        downstrm_temp_val <- paste0(
+          min(dst_vector),
+          " to ",
+          max(dst_vector)
+        )
+        
+      } else {
+        check_temp_val <- NA_real_
+        downstrm_temp_val <- NA_character_
+      }
+      
       check_pwrld_val <- min(grp$max_power_kw_)
       
       # get values in place to determine which reason for run value to assign to record
@@ -187,7 +231,7 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
       # add in logic to check for existence of SCR columns
       # if they don't exist, control_yn will be NO
       # if they do exist, run the following existing logic
-      if (sum(str_detect(names(grp), "scr")) == 0){
+      if (sum(str_detect(names(grp), "scr")) == 0 | is.na(check_temp_val)){
         control_yn_val <- "N"
       } else{
         if (!is.na(grp$scr_treated_run[1]) & grp$scr_treated_run[1] == 1){ # changed from grp$scr_treated_run[2] to grp$scr_treated_run[1]
@@ -210,26 +254,28 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
         downstream_temp_F = as.character(downstrm_temp_val),
         controlled_yn = as.character(control_yn_val),
         power_load_kW = as.character(power_ld_val),
-        gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_", as.Date(date_val, format = "%Y-%m-%d %H:%M:%S")), " ", "-")) # for 1500 file
-        # gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_", as.Date(date_val, format = "%m/%d/%Y %H:%M")), " ", "-")) # for 1100 file
-        # gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_",as.Date(date_val, "%Y-%m-%d %H:%M:%S")), " ", "-"))
+        gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"))), " ", "-"))
       )
       
       if(df_doc_tbl_exists){
         doc_tbl_filt_prep <- df_doc_tbl %>%
           mutate(
             gen_match = case_when(
-              !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+              is.numeric(gen_number) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
               gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
               TRUE ~ "no match"
             )
           )
         doc_tbl_filt <- doc_tbl_filt_prep %>%
           filter(
-            str_detect(generator, as.character(building_val)) & check_load_status == load_status &
-              gen_match == "match" & #str_detect(gen_range, gen_number) &
-              # as.Date(date_val, format = "%m/%d/%Y %H:%M") == date #1100 files
-              as.Date(date_val, format = "%Y-%m-%d %H:%M:%S") == date #1500 files
+            (str_detect(generator, as.character(building_val)) &
+              check_load_status == load_status &
+              gen_match == "match" &
+              as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date) |
+              (str_detect(generator, as.character(building_val)) &
+                 str_detect(op_mode_comment, "(?i)Test for report generated") & # if this comment exists, load status doesn't matter
+                 gen_match == "match" &
+                 as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date)
           ) %>%
           select(
             gen_date_key,
@@ -243,9 +289,8 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
           doc_tbl_filt <- doc_tbl_filt_prep %>%
             filter(
               str_detect(generator, as.character(building_val)) &
-                gen_match == "match" & #str_detect(gen_range, gen_number) &
-                # as.Date(date_val, format = "%m/%d/%Y %H:%M") == date #1100 files
-                as.Date(date_val, format = "%Y-%m-%d %H:%M:%S") == date #1500 files
+                gen_match == "match" &
+                as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date
             ) %>%
             select(
               gen_date_key,
@@ -302,15 +347,28 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
           # get values in place, then create a new, 1-line df
           generator_val <- str_replace(curr_df$generator_info, "genlogs ", "")
           gen_range_val <- str_replace_all(str_extract(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*"), "(?i)Gen-|(?i)Gen| ", "")
-          date_val <- curr_df$timestamps
+          date_val <- curr_df$date_cleaned
           hr_meter_val <- next_df$runtime_hr_
           power_ld_val <- next_df$max_power_kw_
-          downstrm_temp_val <- paste0(round(as.numeric(curr_df[, str_detect(names(curr_df), "downstream")]), 3), " to ", round(as.numeric(next_df[, str_detect(names(next_df), "downstream")]), 3))
           building_val = str_replace_all(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*|-| ", "")
+          check_pwrld_val <- min(curr_df$max_power_kw_, next_df$max_power_kw_) # this isn't written to df, but used to check controlled status
 
-          # get vals in place to determine controlled status
-          check_temp_val <- min(curr_df[, str_detect(names(curr_df), "downstream")], next_df[, str_detect(names(next_df), "downstream")])
-          check_pwrld_val <- min(curr_df$max_power_kw_, next_df$max_power_kw_)
+          # get vals in place to determine controlled status, account for files without downstream temp info
+          if (sum(str_detect(names(curr_df), "downstream")) > 0){
+            check_temp_val <- min(curr_df[, str_detect(names(curr_df), "downstream")], next_df[, str_detect(names(next_df), "downstream")])
+            
+            # get downstream temp min & max to concat min-max
+            dst_vector <- c(round(as.numeric(curr_df[, str_detect(names(curr_df), "downstream")]), 3),
+                            round(as.numeric(next_df[, str_detect(names(next_df), "downstream")]), 3))
+            downstrm_temp_val <- paste0(
+              min(dst_vector),
+              " to ",
+              max(dst_vector)
+            )
+          } else {
+            check_temp_val <- NA_real_
+            downstrm_temp_val <- NA_character_
+          }
           
           # get vals in place to determine which reason for run value to grab
           check_load_status = case_when(
@@ -323,7 +381,7 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
           # if they don't exist, control_yn will be NO
           # if they do exist, run the following existing logic
           control_yn_val <- "N"
-          if (sum(str_detect(names(grp), "scr")) == 0){
+          if (sum(str_detect(names(grp), "scr")) == 0 | is.na(check_temp_val)){ # if no downstream temp info, assume uncontrolled
             control_yn_val <- "N"
           } else{
             if (!is.na(curr_df$scr_treated_run) & curr_df$scr_treated_run == 1){ # changed from next_df$scr_treated_run to curr_df$scr_treated_run
@@ -346,32 +404,36 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
             downstream_temp_F = as.character(downstrm_temp_val),
             controlled_yn = as.character(control_yn_val),
             power_load_kW = as.character(power_ld_val),
-            # gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_", as.Date(date_val, format = "%m/%d/%Y %H:%M")), " ", "-")) # for 1100 file
-            gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_",as.Date(date_val, format = "%Y-%m-%d %H:%M:%S")), " ", "-")) # for 1500 file
-            # gen_date_key = as.character(str_replace_all(paste0(str_replace(generator_val, "(?i)Gen.*", "GEN"), "_",as.Date(date_val, "%Y-%m-%d %H:%M:%S")), " ", "-"))
+            gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"))), " ", "-")) # for 1100 file
           )
 
           if(df_doc_tbl_exists){
             doc_tbl_filt_prep <- df_doc_tbl %>%
               mutate(
                 gen_match = case_when(
-                  !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+                  is.numeric(gen_number) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
                   gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
                   TRUE ~ "no match"
                 )
               )
             
+            # updated to this 9/30:
             doc_tbl_filt <- doc_tbl_filt_prep %>%
               filter(
-                str_detect(generator, as.character(building_val)) &
-                  gen_match == "match" & #check_load_status == load_status & str_detect(gen_range, gen_number) &
-                  # as.Date(date_val, format = "%m/%d/%Y %H:%M") == date #1100 files
-                  as.Date(date_val, format = "%Y-%m-%d %H:%M:%S") == date #1500 files
+                (str_detect(generator, as.character(building_val)) &
+                   check_load_status == load_status &
+                   gen_match == "match" &
+                   as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date) |
+                  (str_detect(generator, as.character(building_val)) &
+                     str_detect(op_mode_comment, "(?i)Test for report generated") & # if this comment exists, load status doesn't matter
+                     gen_match == "match" &
+                     as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date)
               ) %>%
               select(
                 gen_date_key,
                 reason_for_run,
-                op_mode_comment
+                op_mode_comment,
+                load_status
               )
             
             # handle cases where load statuses don't match
@@ -379,9 +441,8 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
               doc_tbl_filt <- doc_tbl_filt_prep %>%
                 filter(
                   str_detect(generator, as.character(building_val)) &
-                    gen_match == "match" & #str_detect(gen_range, gen_number)
-                    # as.Date(date_val, format = "%m/%d/%Y %H:%M") == date #1100 files
-                    as.Date(date_val, format = "%Y-%m-%d %H:%M:%S") == date #1500 files
+                    gen_match == "match" &
+                    as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date
                 ) %>%
                 select(
                   gen_date_key,
@@ -452,7 +513,7 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
     date = fmt_date
   )
 
-# widen table so that gens are next to eachother, bind rows based on datetime
+# widen table so that gens are next to each other, bind rows based on datetime
 final_gen_splt <- split(new_rws, new_rws$generator) %>%
   lapply(function(df_final){
   gen_id <- df_final$generator[1]
@@ -465,7 +526,24 @@ write_prep <- final_gen_splt %>%
     full_join,
     by = "date"
   ) %>%
-  # arrange(as.POSIXct(date, format = "%m/%d/%Y %H:%M")) #1100 files
-  arrange(as.POSIXct(date, format = "%Y-%m-%d %H:%M:%S")) #1500 files
+  mutate(
+    write_date = as.POSIXct(date, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M"))
+  ) %>%
+  select(
+    -c(date)
+  ) %>%
+  select(
+    write_date,
+    everything()
+  ) %>%
+  rename(
+    date = write_date
+  ) %>%
+  arrange(date) %>%
+  mutate(
+    date = as.character(date)
+  )
 
-write.xlsx(write_prep, file.path(fol_out, paste0(facility, "_", csv_filename, "_.xlsx")))
+source("source/write_processed_raw_data_to_template.R")
+
+
