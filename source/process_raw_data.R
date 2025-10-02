@@ -31,17 +31,22 @@ options(scipen = 999)
 source("source/function.R")
 
 # user input ####
-csv_filename <- "1100 Gen 1-5 Run Log (last month)" # user input
-docx_tbl_filename <- "Generator Run log for August 2025" # word doc table
+csv_filename <- "4100 Gen 1-5 Run Log (last month)" # user input
+docx_tbl_filename <- "Generator Run log for September 2025" # word doc table
 facility <- "Mesa"
+month_folder <- "sep-2025"
 
 # read in data ####
 fol_main <- here::here()
-fol_data <- file.path(fol_main, "raw_data")
+fol_data <- file.path(fol_main, "raw_data", month_folder)
 fol_out <- file.path(fol_main, "output")
 list_files <- list.files(fol_data, ".csv")
 
 df_gen_log_in <- read.csv(file.path(fol_data, paste0(csv_filename, ".csv")))
+
+if (nrow(df_gen_log_in) <  1){
+  stop("No data to process in this file! Move on to the next one.")
+}
 
 # read in word doc table, containing reason for run info
 # do a bit of cleanup in order to be able to join it to other datasets
@@ -126,9 +131,9 @@ rw_dfs_prep <- rw_dfs %>% lapply(function(df){
   colnames(df) <- str_replace_all(str_replace_all(str_replace_all(str_replace(colnames(df), colname_extr, ""), "[0-9]", ""), "\\.{2,}", ""), "[.]", "_")
   colnames(df) <- str_replace_all(colnames(df), "(?i)SCR_SCR", "SCR")
   df_out <- df %>%
-    filter(rowSums(is.na(select(., -1))) < (ncol(.) - 1)) %>%
+    dplyr::filter(rowSums(is.na(select(., -1))) < (ncol(.) - 1)) %>%
     mutate(
-      update_point = (Engine_Running == 1 & lag(Engine_Running, default = 0) == 0),
+      update_point = (Engine_Running == 1 & dplyr::lag(Engine_Running, default = 0) == 0),
       group_num = cumsum(update_point),
       generator_info = gen_info
     ) %>%
@@ -150,9 +155,9 @@ colnames(rw_dfs_prep) <- tolower(colnames(rw_dfs_prep))
 # update 3 cases of building names, so that they will match the rfr doc table for joining
 rw_dfs_prep <- rw_dfs_prep %>%
   mutate(
-    generator_info = str_replace(generator_info, "419", "M"),
-    generator_info = str_replace(generator_info, "426", "X"),
-    generator_info = str_replace(generator_info, "500", "M")
+    generator_info = str_replace(generator_info, "\\b419\\b", "M"),
+    generator_info = str_replace(generator_info, "\\b426\\b", "X"),
+    generator_info = str_replace(generator_info, "\\b500\\b", "M") # \\b is a word boundary, to ensure only these standalone numbers get replaced (ie. 500 vs 4500)
   )
 
 
@@ -177,7 +182,7 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
       )
     ) %>%
     ungroup() %>%
-    filter(
+    dplyr::filter(
       er_status_count != row_number(), # for cases of 0's starting the dataset (0 must follow a 1 to be used)
       er_status_count < 2, # only take the first zero when there are multiple
       engine_running <= 1, # if any aberrant reading values in this column, omit those records
@@ -254,28 +259,28 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
         downstream_temp_F = as.character(downstrm_temp_val),
         controlled_yn = as.character(control_yn_val),
         power_load_kW = as.character(power_ld_val),
-        gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"))), " ", "-"))
+        gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"))), " ", "-"))
       )
       
       if(df_doc_tbl_exists){
         doc_tbl_filt_prep <- df_doc_tbl %>%
           mutate(
             gen_match = case_when(
-              is.numeric(gen_number) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+              !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
               gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
               TRUE ~ "no match"
             )
           )
         doc_tbl_filt <- doc_tbl_filt_prep %>%
-          filter(
+          dplyr::filter(
             (str_detect(generator, as.character(building_val)) &
               check_load_status == load_status &
               gen_match == "match" &
-              as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date) |
+              as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date) |
               (str_detect(generator, as.character(building_val)) &
                  str_detect(op_mode_comment, "(?i)Test for report generated") & # if this comment exists, load status doesn't matter
                  gen_match == "match" &
-                 as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date)
+                 as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date)
           ) %>%
           select(
             gen_date_key,
@@ -287,10 +292,10 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
         # handle cases where load statuses don't match
         if(nrow(doc_tbl_filt) == 0){
           doc_tbl_filt <- doc_tbl_filt_prep %>%
-            filter(
+            dplyr::filter(
               str_detect(generator, as.character(building_val)) &
                 gen_match == "match" &
-                as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date
+                as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date
             ) %>%
             select(
               gen_date_key,
@@ -404,14 +409,14 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
             downstream_temp_F = as.character(downstrm_temp_val),
             controlled_yn = as.character(control_yn_val),
             power_load_kW = as.character(power_ld_val),
-            gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"))), " ", "-")) # for 1100 file
+            gen_date_key = as.character(str_replace_all(paste0(str_replace(str_replace_all(generator_val, "-|_| ", ""), "(?i)Gen.*", "GEN"), "_", as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"))), " ", "-")) # for 1100 file
           )
 
           if(df_doc_tbl_exists){
             doc_tbl_filt_prep <- df_doc_tbl %>%
               mutate(
                 gen_match = case_when(
-                  is.numeric(gen_number) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+                  !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
                   gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
                   TRUE ~ "no match"
                 )
@@ -419,15 +424,15 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
             
             # updated to this 9/30:
             doc_tbl_filt <- doc_tbl_filt_prep %>%
-              filter(
+              dplyr::filter(
                 (str_detect(generator, as.character(building_val)) &
                    check_load_status == load_status &
                    gen_match == "match" &
-                   as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date) |
+                   as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date) |
                   (str_detect(generator, as.character(building_val)) &
                      str_detect(op_mode_comment, "(?i)Test for report generated") & # if this comment exists, load status doesn't matter
                      gen_match == "match" &
-                     as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date)
+                     as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date)
               ) %>%
               select(
                 gen_date_key,
@@ -439,10 +444,10 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
             # handle cases where load statuses don't match
             if(nrow(doc_tbl_filt) == 0){
               doc_tbl_filt <- doc_tbl_filt_prep %>%
-                filter(
+                dplyr::filter(
                   str_detect(generator, as.character(building_val)) &
                     gen_match == "match" &
-                    as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S")) == date
+                    as.Date(date_val, tryFormats = c("%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")) == date
                 ) %>%
                 select(
                   gen_date_key,
