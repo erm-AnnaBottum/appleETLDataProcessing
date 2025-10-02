@@ -31,7 +31,7 @@ options(scipen = 999)
 source("source/function.R")
 
 # user input ####
-csv_filename <- "4100 Gen 1-5 Run Log (last month)" # user input
+csv_filename <- "2100 Gen 1-5 Run Log (last month)" # user input
 docx_tbl_filename <- "Generator Run log for September 2025" # word doc table
 facility <- "Mesa"
 month_folder <- "sep-2025"
@@ -66,6 +66,7 @@ df_doc_tbl <- read_excel(file.path(fol_data, paste0(docx_tbl_filename, ".xlsx"))
       str_detect(rfr, "(?i)Load bank") ~ "Maint. & Testing",
       str_detect(rfr, "(?i)Switchgear") ~ "Other",
       str_detect(rfr, "(?i)Transformer") ~ "Other",
+      str_detect(rfr, "UPS") ~ "Other",
       str_detect(rfr, "(?i)Quarterly PM|Q") ~ "Maint. & Testing",
       str_detect(rfr, "(?i)3 YR PM") ~ "Maint. & Testing",
       str_detect(rfr, "(?i)Test") ~ "Maint. & Testing",
@@ -236,7 +237,9 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
       # add in logic to check for existence of SCR columns
       # if they don't exist, control_yn will be NO
       # if they do exist, run the following existing logic
-      if (sum(str_detect(names(grp), "scr")) == 0 | is.na(check_temp_val)){
+      if (sum(str_detect(names(grp), "scr")) == 0 |
+          is.na(check_temp_val) |
+          grp$engine_running[1] == 1 & grp$scr_treated_run[1] == 1 & grp$scr_shutdown[1] == 1){ # new logic added here 10/2
         control_yn_val <- "N"
       } else{
         if (!is.na(grp$scr_treated_run[1]) & grp$scr_treated_run[1] == 1){ # changed from grp$scr_treated_run[2] to grp$scr_treated_run[1]
@@ -252,6 +255,9 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
         }
       }
       
+      # new logic to add:
+      # if engine_running == 1 & scr_treated_run == 1 & scr_shutdown == 1: control_yn_val <- "N"
+      
       new_rw_prep_a <- data.frame(
         generator = as.character(generator_val),
         date = as.character(date_val),
@@ -266,7 +272,7 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
         doc_tbl_filt_prep <- df_doc_tbl %>%
           mutate(
             gen_match = case_when(
-              !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+              !is.na(as.numeric(gen_number)) & (as.numeric(gen_number) >= as.numeric(gen_start_rng) & as.numeric(gen_number) <= as.numeric(gen_end_rng)) ~ "match", # cases where gen # is a number value
               gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
               TRUE ~ "no match"
             )
@@ -386,7 +392,8 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
           # if they don't exist, control_yn will be NO
           # if they do exist, run the following existing logic
           control_yn_val <- "N"
-          if (sum(str_detect(names(grp), "scr")) == 0 | is.na(check_temp_val)){ # if no downstream temp info, assume uncontrolled
+          if (sum(str_detect(names(grp), "scr")) == 0 | is.na(check_temp_val) |
+              curr_df$engine_running == 1 & curr_df$scr_treated_run == 1 & curr_df$scr_shutdown == 1){ # if no downstream temp info, assume uncontrolled
             control_yn_val <- "N"
           } else{
             if (!is.na(curr_df$scr_treated_run) & curr_df$scr_treated_run == 1){ # changed from next_df$scr_treated_run to curr_df$scr_treated_run
@@ -416,7 +423,8 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
             doc_tbl_filt_prep <- df_doc_tbl %>%
               mutate(
                 gen_match = case_when(
-                  !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", # cases where gen # is a number value
+                  # !is.na(as.numeric(gen_number)) & (gen_number > gen_start_rng & gen_number < gen_end_rng) ~ "match", 
+                  !is.na(as.numeric(gen_number)) & (as.numeric(gen_number) >= as.numeric(gen_start_rng) & as.numeric(gen_number) <= as.numeric(gen_end_rng)) ~ "match", # cases where gen # is a number value
                   gen_number == gen_start_rng ~ "match", # cases where it's a number or character and equals start range
                   TRUE ~ "no match"
                 )
@@ -516,7 +524,8 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
   ) %>%
   rename(
     date = fmt_date
-  )
+  ) %>%
+  distinct() # at some point go back and determine why some datasets are getting duplicate records in outputs.
 
 # widen table so that gens are next to each other, bind rows based on datetime
 final_gen_splt <- split(new_rws, new_rws$generator) %>%
