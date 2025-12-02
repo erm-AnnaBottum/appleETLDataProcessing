@@ -11,20 +11,23 @@ et_template <- read_excel(
 names(et_template) <- tolower(names(et_template))
 names(write_prep) <- tolower(names(write_prep))
 
-write_template <- write_prep %>%
-  bind_rows(
-    et_template
-  )
+# write_template <- write_prep %>%
+#   bind_rows(
+#     et_template
+#   ) %>%
+  # mutate(
+  #   date_new = as.POSIXct(date)#format(as.POSIXct(date, format = "%Y-%m-%d %I:%M:%S"), "%m/%d/%Y %H:%M %p")#format(as.Date(date, tryFormats = c("%Y-%m-%d %H:%M:%S")), "%m/%d/%Y %H:%M %p")
+  # )
+write_template <- et_template %>% bind_rows(write_prep)
 
-# get date info to create filename
-date_str <- paste0(lubridate::month(write_template$date[[1]], label = TRUE), # specify lubridate to use label argument
-                   "-",
-                   year(write_template$date[[1]]))
+write_lst <- list("data" = write_template,
+                  "records_missing_rfrs" = df_no_rfr,
+                  "unused_rfrs" = df_unused_rfrs)
 
-write.xlsx(write_template, file.path(fol_out, paste0(
+
+write.xlsx(write_lst, file.path(fol_out, paste0(
   facility, "_",
-  date_str, "_",
-  str_replace(csv_filename, " \\(last month\\)", ""), "_",
+  month_folder, "_Run_Logs_",
   format(Sys.Date(), "%Y%m%d"), ".xlsx")
   )
 )

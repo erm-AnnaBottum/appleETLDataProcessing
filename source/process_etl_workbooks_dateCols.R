@@ -1,8 +1,9 @@
 # Apple ETL Data Automation
-# Summer 2025 - Anna Bottum
+# Fall/Winter 2025 - Anna Bottum
 #
 # Process Emissions Tracking Workbooks into format used for loading into
 # Cority database.
+# This script handles ETL workbooks where each generator section has its own date column
 
 if(!require(pacman)){ install.packages("pacman") } else { library(pacman) }
 # import ####
@@ -20,8 +21,8 @@ p_load(
 options(scipen = 999)
 
 # user input ####
-filename <- "20250917_FINAL_WKE Emissions Tracking v2.1"
-facility <- "Waukee"
+filename <- "ULA Generator Tracking Workbook v3.2"
+facility <- "Ulanqab" # ULA = Ulanqab, GYA = Guiyang
 collector <- "mikayla"
 rows_to_skip <- 2
 
@@ -38,7 +39,8 @@ tag_mappings <- read_excel(
   sheet = "TagEndings"
 ) %>%
   mutate(
-    original_tag = str_replace_all(sub(".*\\|", "", original_tag), "\\r?\\n|\\r", " ")
+    original_tag = str_replace_all(sub(".*\\|", "", original_tag), "\\r?\\n|\\r", " "),
+    original_tag = str_replace_all(original_tag, " ", "")
   ) %>%
   distinct()
 
@@ -64,6 +66,12 @@ df_prep <- df_in %>%
   t() %>% # transpose so that 'right' becomes 'down', in order to use fill(). this returns a matrix
   as.data.frame() %>% # fill() works on dfs, so convert
   fill(V1, .direction = "down") %>%
+  mutate(
+    V2 = case_when(
+      str_detect(V2, "(?i)Date") ~ "Date",
+      TRUE ~ str_replace_all(str_replace_all(V2, "[\U4E00-\U9FFF\U3000-\U303F]|（|）", ""), "\\r?\\n|\\r", " ")
+    )
+  ) %>%
   t() %>% # transpose back to original state
   as.data.frame() # convert back to df
 
@@ -77,13 +85,87 @@ if(FALSE){
 }
 
 names(df_prep) <- new_colnames
-colnames(df_prep)[1] <- "param_date"
-names(df_prep)[2] <- "param_year"
-df_clean <- df_prep[-c(1,2), ]
+# colnames(df_prep)[1] <- "param_date"
+# names(df_prep)[2] <- "param_year"
+df_clean <- df_prep[-c(1,2), ] # get rid of two extra header rows
 
-df_pvt <- df_clean %>%
+# breakaway from regular workflow:
+# need to split dataframe by generator, pivot each one individually. Keep each
+# sub df's date as the spine column
+gen_categories <- unique(str_extract(names(df_clean), "^[^|]+"))
+
+# need to increment datetime for duplicate dates here, BEFORE splitting everything up
+
+# df_out_prep <- df_data_full %>%
+#   mutate(
+#     Date = format(janitor::convert_to_datetime(Date), "%m/%d/%Y %I:%M %p"), #format(openxlsx::convertToDate(param_date), "%m/%d/%Y %H:%M"), #paste0(format(openxlsx::convertToDate(param_date), "%m/%d/%Y"), " 12:00 AM"),
+#     Tag = paste(generator_tag, output_tag, sep = "\\"),
+#     Value = param_value,
+#     Collector = collector,
+#     `Engine Mode CF` = NA_character_ # for now
+#   ) %>%
+#   group_by(
+#     Date,
+#     Tag
+#   ) %>%
+#   mutate(
+#     group_n = n(),
+#     row = row_number(),
+#     Date = case_when(
+#       group_n > 1 ~ format(as.Date(Date, "%m/%d/%Y %I:%M %p") + minutes(row_number() - 1), "%m/%d/%Y %I:%M %p"),
+#       TRUE ~ Date #format(as.Date(Date, "%m/%d/%Y %I:%M %p"), "%m/%d/%Y %I:%M %p")
+#     )
+#   )
+
+# split data frame by generator, increment any duplicate dates by 1 minute
+# will finish here with a list of dataframes
+gen_split_for_dates <- lapply(gen_categories, function(category){
+  df <- df_clean[, str_detect(names(df_clean), category)] # pull out just current gen df
+  names(df)[1] <- "Date"
+  df_out <- df %>%
+    filter(!is.na(Date)) %>%
+    group_by(Date) %>%
+    mutate(
+      group_n = n(),
+      Date = case_when(
+        group_n > 1 ~ format(as.Date(as.numeric(Date), origin = "1899-12-30") + minutes(row_number() - 1), "%m/%d/%Y %I:%M %p"), #as.Date(x, "%m/%d/%Y %I:%M %p")
+        TRUE ~ format(as.Date(as.numeric(Date), origin = "1899-12-30"), "%m/%d/%Y %I:%M %p") #as.Date(Date, "%m/%d/%Y %I:%M %p")
+      )
+    ) %>%
+    select(-c(group_n))
+})# %>% bind_rows()
+
+# grab all unique dates from full dataset, then join each individual set back together based on date
+# all_gen_dates <- lapply(gen_categories, function(category){
+#   df <- df_prep[, str_detect(names(df_prep), category)] # pull out just current gen df
+#   names(df)[1] <- "Date"
+#   dates_out <- df %>% select(Date) %>% distinct()
+# }) %>%
+#   bind_rows() %>%
+#   # distinct() %>%
+#   filter(!str_detect(Date, "[A-Za-z]"))
+
+all_gen_dates <- bind_rows(gen_split_for_dates) %>%
+  select(Date) %>%
+  distinct()
+
+# for (i in 1:length(gen_categories)){
+#   df <- df_prep[, str_detect(names(df_prep), gen_categories[[i]])]
+#   names(df)[1] <- "Date"
+#   df <- df %>% filter(!is.na(Date))
+#   all_gen_dates <- all_gen_dates %>% left_join(df, by = "Date") # need to get the cumulative product of each dataframe joining to date spine
+# }
+
+for (i in 1:length(gen_split_for_dates)){
+  df <- gen_split_for_dates[[i]] #df_prep[, str_detect(names(df_prep), gen_categories[[i]])]
+  # names(df)[1] <- "Date"
+  # df <- df %>% filter(!is.na(Date))
+  all_gen_dates <- all_gen_dates %>% left_join(df, by = "Date") # need to get the cumulative product of each dataframe joining to date spine
+}
+
+df_pvt <- all_gen_dates %>%
   pivot_longer(
-    cols = -c(param_date, param_year)
+    cols = -c(Date)
   ) %>%
   mutate(
     param_value = case_when(
@@ -91,24 +173,25 @@ df_pvt <- df_clean %>%
     )
   ) %>%
   filter(
-    !str_detect(name, "Month/Year")
+    !str_detect(name, "Month/Year"),
+    !str_detect(name, "Month Year")
   )
 
 # take out the starting_hrs portion of df to fill down columns, then join back in
-df_meta_hrs <- df_pvt %>%
-  filter(
-    param_date == "Starting Hrs"
-  ) %>%
-  fill(
-    param_value,
-    .direction = "down"
-  )
+# df_meta_hrs <- df_pvt %>%
+#   filter(
+#     param_date == "Starting Hrs"
+#   ) %>%
+#   fill(
+#     param_value,
+#     .direction = "down"
+#   )
 
 df_data_full <- df_pvt %>%
   filter(
-    param_date != "Starting Hrs", 
+    Date != "Starting Hrs", 
     !is.na(value),
-    !str_detect(name, "Month Year")
+    !str_detect(name, "Year for Annual Hours of Operation")
   ) %>%
   mutate(
     first_string = str_replace_all(as.character(as.numeric(value)), "\\..*", ""),
@@ -128,7 +211,8 @@ df_data_full <- df_pvt %>%
     # check_nchar = nchar(check),
     # chec_val = as.character(value),
     generator_name = sub("\\|.*", "", name),
-    param_type = str_replace_all(sub(".*\\|", "", name), "\\r?\\n|\\r", " ")
+    param_type = str_replace_all(sub(".*\\|", "", name), "\\r?\\n|\\r", " "),
+    param_type = str_replace_all(param_type, " ", "")
   ) %>%
   left_join(
     tag_mappings,
@@ -155,7 +239,7 @@ check <- df_data_full %>% filter(is.na(output_tag))
 # bin by tag/no tag, write to separate tabs of out
 df_out_prep <- df_data_full %>%
   mutate(
-    Date = format(janitor::convert_to_datetime(param_date), "%m/%d/%Y %I:%M %p"), #format(openxlsx::convertToDate(param_date), "%m/%d/%Y %H:%M"), #paste0(format(openxlsx::convertToDate(param_date), "%m/%d/%Y"), " 12:00 AM"),
+    # Date = format(janitor::convert_to_datetime(Date), "%m/%d/%Y %I:%M %p"), #format(openxlsx::convertToDate(param_date), "%m/%d/%Y %H:%M"), #paste0(format(openxlsx::convertToDate(param_date), "%m/%d/%Y"), " 12:00 AM"),
     Tag = paste(generator_tag, output_tag, sep = "\\"),
     Value = param_value,
     Collector = collector,
@@ -168,13 +252,13 @@ df_out_prep <- df_data_full %>%
   mutate(
     group_n = n(),
     row = row_number(),
-    Date = case_when(
-      group_n > 1 ~ format(as.Date(Date, "%m/%d/%Y %I:%M %p") + minutes(row_number() - 1), "%m/%d/%Y %I:%M %p"),
-      TRUE ~ Date #format(as.Date(Date, "%m/%d/%Y %I:%M %p"), "%m/%d/%Y %I:%M %p")
-    )
+    # Date = case_when(
+    #   group_n > 1 ~ format(as.Date(Date, "%m/%d/%Y %I:%M %p") + minutes(row_number() - 1), "%m/%d/%Y %I:%M %p"),
+    #   TRUE ~ Date #format(as.Date(Date, "%m/%d/%Y %I:%M %p"), "%m/%d/%Y %I:%M %p")
+    # )
   )
 
-  # move rfr comment into last column
+# move rfr comment into last column
 splt_prep <- split(df_out_prep, f = list(df_out_prep$generator_tag, df_out_prep$Date), drop = TRUE) # drop = TRUE forces to drop levels that don't occur
 
 df_final <- lapply(splt_prep, function(splt){
@@ -220,13 +304,6 @@ end_date <- format(max(as.Date(df_final$Date, "%m/%d/%Y %H:%M")), "%Y%m%d")
 write_out <- list(
   "Data Import" = df_out_wtag,
   "Data Import - No Tags" = df_out_notag
-  )
+)
 
 write.xlsx(write_out, file.path("output", paste0(facility, "_ETL_Data_", start_date, "-", end_date, ".xlsx")))
-
-
-
-
-
-
-

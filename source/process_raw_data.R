@@ -525,7 +525,11 @@ new_rws <- gen_splt_lst %>% lapply(function(gen_df){
   rename(
     date = fmt_date
   ) %>%
-  distinct() # at some point go back and determine why some datasets are getting duplicate records in outputs.
+  distinct() %>% # at some point go back and determine why some datasets are getting duplicate records in outputs.
+  mutate(
+    hour_meter = as.numeric(hour_meter),
+    power_load_kW = as.numeric(power_load_kW)
+  )
 
 # widen table so that gens are next to each other, bind rows based on datetime
 final_gen_splt <- split(new_rws, new_rws$generator) %>%
