@@ -22,6 +22,7 @@ write_template <- et_template %>% bind_rows(write_prep)
 
 write_lst <- list("data" = write_template,
                   "records_missing_rfrs" = df_no_rfr,
+                  "scr_shutdown_qc" = df_shutdowns,
                   "unused_rfrs" = df_unused_rfrs)
 
 

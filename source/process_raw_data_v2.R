@@ -1,5 +1,6 @@
 # Apple ETL Data Automation
 # Summer 2025 - Anna Bottum
+# Last updated 12/16/25
 #
 # process raw datasets into Emissions Tracking Workbook template format
 # user will copy and paste output from this code into Emissions Tracking Workbook
@@ -32,10 +33,10 @@ source("source/function.R")
 
 # user input ####
 # csv_filename <- "2100 Gen 1-5 Run Log (last month)" # user input
-gen_run_log_filename <- "Generator Run log for October 2025" # generator run log word doc table
-fpump_run_log_filename <- "Fire Pump Run log for October 2025" # fire pump run log word doc table
+gen_run_log_filename <- "Generator Run log for September 2025" # generator run log word doc table
+fpump_run_log_filename <- "Fire Pump Run log for September 2025" # fire pump run log word doc table
 facility <- "Mesa"
-month_folder <- "Oct-2025"
+month_folder <- "Sept-2025"
 
 # read in data ####
 fol_main <- here::here()
@@ -115,7 +116,7 @@ if(nrow(df_run_log) > 0){
 # loop through all logs in the folder, process each and finally export together
 gen_logs_list <- list.files(fol_data, pattern = "*.csv", full.names = TRUE)
 
-combined_gen_logs <- lapply(gen_logs_list, function(input_file){
+lst_combined_gen_logs <- lapply(gen_logs_list, function(input_file){
   df_gen_log_in <- read.csv(input_file)
   
   if (nrow(df_gen_log_in) <  1){
@@ -240,7 +241,7 @@ combined_gen_logs <- lapply(gen_logs_list, function(input_file){
           # get values in place, then create a new, 1-line df
           generator_val <- str_replace(grp$generator_info[1], "genlogs ", "")
           gen_range_val <- str_replace_all(str_extract(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*"), "(?i)Gen-|(?i)Gen| ", "")
-          date_val <- grp$date_cleaned[1] #grp$timestamps[1]
+          date_val <- grp$date_cleaned[1]
           hr_meter_val <- grp$runtime_hr_[2]
           power_ld_val <- grp$max_power_kw_[2]
           
@@ -248,6 +249,9 @@ combined_gen_logs <- lapply(gen_logs_list, function(input_file){
           
           # get vals in place to determine controlled status, account for files without downstream temp info
           if (sum(str_detect(names(grp), "downstream")) > 0){
+            # if this column exists, need to cast it as numeric for the few odd files
+            dstemp_colname <- colnames(grp[, str_detect(names(grp), "downstream")])
+            grp[[dstemp_colname]] <- as.numeric(grp[[dstemp_colname]])
             check_temp_val <- min(grp[, str_detect(names(grp), "downstream")])
             
             # get downstream temp min & max to concat min-max
@@ -412,7 +416,6 @@ combined_gen_logs <- lapply(gen_logs_list, function(input_file){
             curr_df <- grp_split_rws[[curr_rw_num]]
             next_df <- grp_split_rws[[curr_rw_num + 1]]
             
-            
             # get values in place, then create a new, 1-line df
             generator_val <- str_replace(curr_df$generator_info, "genlogs ", "")
             gen_range_val <- str_replace_all(str_extract(str_replace(generator_val, "genlogs", ""), "(?i)Gen.*"), "(?i)Gen-|(?i)Gen| ", "")
@@ -424,6 +427,11 @@ combined_gen_logs <- lapply(gen_logs_list, function(input_file){
             
             # get vals in place to determine controlled status, account for files without downstream temp info
             if (sum(str_detect(names(curr_df), "downstream")) > 0){
+              # if downstream temp col exists, cast as numeric for the odd file
+              dstemp_colname <- colnames(curr_df[, str_detect(names(curr_df), "downstream")])
+              curr_df[[dstemp_colname]] <- as.numeric(curr_df[[dstemp_colname]])
+              next_df[[dstemp_colname]] <- as.numeric(next_df[[dstemp_colname]])
+              
               check_temp_val <- min(curr_df[, str_detect(names(curr_df), "downstream")], next_df[, str_detect(names(next_df), "downstream")])
               
               # get downstream temp min & max to concat min-max
@@ -638,10 +646,21 @@ combined_gen_logs <- lapply(gen_logs_list, function(input_file){
     #   }) %>% bind_rows()
     
     # handle duplicate comments
-  }
+  } # close of entire file read-in
   # return(list(final_gen_splt))
   # return(list(final_gen_splt, df_run_log))
-}) %>% bind_rows() # end of combined gen logs (main) loop
+  
+  # rw_dfs_prep = dataframe that we can take scr shutdown breakdowns from
+  # new_rws = final output, that needs to be passed to bind_rows once all files are together
+  list("shutdown_df" = rw_dfs_prep, "output_df" = new_rws)
+}) #%>% bind_rows() # end of combined gen logs (main) loop
+
+# get final output dfs from returned list of lists (lst_combined_gen_logs) ####
+combined_gen_logs <- lapply(lst_combined_gen_logs, function(gen_log){
+  output_gen_log <- gen_log[["output_df"]]
+}) %>%
+  bind_rows()
+
 
 # set up fire pump dataset, to bind in
 fire_pump_log <- df_fpump_run_log %>%
@@ -707,6 +726,34 @@ df_no_rfr <- combined_gen_logs %>%
   filter(
     is.na(reason_for_run)
   )
+
+# grab all records where scr_shutdown = 1, for QC tab
+df_shutdowns <- lapply(lst_combined_gen_logs, function(gen_log){
+  output_gen_log <- gen_log[["shutdown_df"]]
+  
+  if(sum(str_detect(names(output_gen_log), "downstream")) > 0){
+    dstemp_colname <- colnames(output_gen_log[, str_detect(names(output_gen_log), "downstream")])
+    output_gen_log[[dstemp_colname]] <- as.numeric(output_gen_log[[dstemp_colname]])
+  }
+  
+  output_gen_log
+}) %>%
+  bind_rows() %>%
+  filter(
+    scr_shutdown == 1
+  ) %>%
+  select(
+    -c(
+      group_size,
+      date_cleaned,
+      # `_downstream_tempf_`,
+      # `_upstream_tempf_`,
+      update_point,
+      group_num
+    )
+  ) %>%
+  rename(date = timestamps) %>%
+  relocate(generator_info) # move generator_info to the front
 
 
 # grab all unique dates from full dataset, then join each individual set back together based on date

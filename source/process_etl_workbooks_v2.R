@@ -20,10 +20,10 @@ p_load(
 options(scipen = 999)
 
 # user input ####
-filename <- "20250917_FINAL_WKE Emissions Tracking v2.1"
-facility <- "Waukee"
+filename <- "20251231_FINAL_MDN Emissions Tracking_v17.0"
+facility <- "Maiden"
 collector <- "mikayla"
-rows_to_skip <- 2
+rows_to_skip <- 3 # this is number of blank rows above first column header
 
 fol_main <- here::here()
 fol_data <- file.path(fol_main, "data")
